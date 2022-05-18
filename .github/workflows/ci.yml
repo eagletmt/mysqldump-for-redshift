@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Run test
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:5.7
+        env:
+          MYSQL_ROOT_PASSWORD: root-password
+          MYSQL_USER: m4r
+          MYSQL_PASSWORD: m4r
+          MYSQL_DATABASE: m4r
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      MYSQL_USER: m4r
+      MYSQL_PWD: m4r
+      MYSQL_DATABASE: m4r
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v1
+      - name: Run cargo test
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+  lint:
+    name: Run lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v1
+      - name: Run cargo fmt
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+      - name: Run cargo clippy
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
