@@ -1,10 +1,12 @@
 use anyhow::Context as _;
+use bytes::BufMut as _;
 use clap::Parser as _;
 use futures_util::stream::TryStreamExt as _;
 use sqlx::Column as _;
 use sqlx::ConnectOptions as _;
 use sqlx::Row as _;
 use sqlx::TypeInfo as _;
+use std::io::Write as _;
 
 #[derive(Debug, clap::Parser)]
 struct Args {
@@ -20,6 +22,12 @@ struct Args {
     database: String,
     #[clap(short, long)]
     table: String,
+    #[clap(short, long)]
+    bucket: String,
+    #[clap(short = 'x', long)]
+    prefix: String,
+    #[clap(short = 'r', long, default_value_t = 64 * 1024 * 1024)]
+    object_size: usize,
 }
 
 #[tokio::main]
@@ -45,20 +53,91 @@ async fn main() -> anyhow::Result<()> {
             )
         })?;
 
-    let query = build_select_query(&mut conn, &args.table).await?;
+    let s3_client = aws_sdk_s3::Client::new(&aws_config::load_from_env().await);
+
+    let query = build_select_query(&mut conn, &args.table)
+        .await
+        .context("failed to build select query")?;
     let mut rows = sqlx::query(&query).fetch(&mut conn);
+
+    let mut writer = flate2::write::GzEncoder::new(
+        bytes::BytesMut::new().writer(),
+        flate2::Compression::default(),
+    );
+    let mut handles = Vec::new();
+
     while let Some(row) = rows
         .try_next()
         .await
         .with_context(|| format!("failed to read row from {}", args.table))?
     {
         let record = to_json(&row).context("failed to convert to JSON from MySQL row")?;
-        println!(
-            "{}",
-            serde_json::to_string(&record).context("failed to serialize row data into JSON")?
-        );
+        let mut line =
+            serde_json::to_vec(&record).context("failed to serialize row data into JSON")?;
+        line.push(0x0a); // Append newline
+        writer
+            .write_all(&line)
+            .with_context(|| format!("failed to compress row data: {:?}", line))?;
+        if writer.get_ref().get_ref().len() >= args.object_size {
+            let n = handles.len();
+            handles.push(tokio::spawn(upload(
+                s3_client.clone(),
+                writer,
+                n,
+                args.bucket.clone(),
+                args.prefix.clone(),
+            )));
+            writer = flate2::write::GzEncoder::new(
+                bytes::BytesMut::new().writer(),
+                flate2::Compression::default(),
+            );
+        }
+    }
+    if !writer.get_ref().get_ref().is_empty() {
+        let n = handles.len();
+        handles.push(tokio::spawn(upload(
+            s3_client.clone(),
+            writer,
+            n,
+            args.bucket.clone(),
+            args.prefix.clone(),
+        )));
     }
 
+    for h in handles {
+        h.await.context("failed to wait JoinHandle")??;
+    }
+
+    Ok(())
+}
+
+async fn upload(
+    s3_client: aws_sdk_s3::Client,
+    writer: flate2::write::GzEncoder<bytes::buf::Writer<bytes::BytesMut>>,
+    sequence_number: usize,
+    bucket: String,
+    prefix: String,
+) -> anyhow::Result<()> {
+    let key = format!("{}{:05}.json.gz", prefix, sequence_number);
+    let body = writer
+        .finish()
+        .context("failed to finish comporession")?
+        .into_inner()
+        .freeze();
+    tracing::info!(
+        "Uploading to s3://{}/{} ({} bytes)",
+        bucket,
+        key,
+        body.len()
+    );
+    s3_client
+        .put_object()
+        .bucket(&bucket)
+        .key(&key)
+        .body(body.into())
+        .send()
+        .await
+        .with_context(|| format!("failed to upload to s3://{}/{}", bucket, key))?;
     Ok(())
 }
 
