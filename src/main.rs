@@ -152,16 +152,19 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to build select query")?
     };
 
+    let dump_options = DumpOptions {
+        table: args.table,
+        bucket: args.bucket,
+        prefix: args.prefix,
+        object_size: args.object_size,
+    };
     if args.compress {
         dump(
             queries,
             pool,
             s3_client,
             GzipRecordWriter::default(),
-            &args.table,
-            &args.bucket,
-            &args.prefix,
-            args.object_size,
+            dump_options,
         )
         .await?;
     } else {
@@ -170,10 +173,7 @@ async fn main() -> anyhow::Result<()> {
             pool,
             s3_client,
             PlainRecordWriter::default(),
-            &args.table,
-            &args.bucket,
-            &args.prefix,
-            args.object_size,
+            dump_options,
         )
         .await?;
     }
@@ -238,15 +238,20 @@ impl RecordWriter for PlainRecordWriter {
     }
 }
 
+#[derive(Debug)]
+struct DumpOptions {
+    table: String,
+    bucket: String,
+    prefix: String,
+    object_size: usize,
+}
+
 async fn dump<W>(
     queries: Vec<String>,
     pool: sqlx::MySqlPool,
     s3_client: aws_sdk_s3::Client,
     mut writer: W,
-    table: &str,
-    bucket: &str,
-    prefix: &str,
-    object_size: usize,
+    options: DumpOptions,
 ) -> anyhow::Result<()>
 where
     W: RecordWriter + Send + 'static,
@@ -259,7 +264,7 @@ where
         while let Some(row) = rows
             .try_next()
             .await
-            .with_context(|| format!("failed to read row from {}", table))?
+            .with_context(|| format!("failed to read row from {}", options.table))?
         {
             let record = to_json(&row).context("failed to convert to JSON from MySQL row")?;
             let mut line =
@@ -268,14 +273,14 @@ where
             writer
                 .write_record(&line)
                 .with_context(|| format!("failed to write row data: {:?}", line))?;
-            if writer.len() >= object_size {
+            if writer.len() >= options.object_size {
                 let n = handles.len();
                 handles.push(tokio::spawn(upload(
                     s3_client.clone(),
                     writer,
                     n,
-                    bucket.to_owned(),
-                    prefix.to_owned(),
+                    options.bucket.to_owned(),
+                    options.prefix.to_owned(),
                 )));
                 writer = W::default();
             }
@@ -287,8 +292,8 @@ where
             s3_client.clone(),
             writer,
             n,
-            bucket.to_owned(),
-            prefix.to_owned(),
+            options.bucket.to_owned(),
+            options.prefix.to_owned(),
         )));
     }
 
