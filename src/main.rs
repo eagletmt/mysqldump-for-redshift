@@ -35,6 +35,8 @@ struct Args {
     partition_number: usize,
     #[clap(short = 'C', long)]
     compress: bool,
+    #[clap(short, long)]
+    query: Option<String>,
 }
 
 #[tokio::main]
@@ -105,19 +107,43 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let queries = build_select_queries(
-        &pool,
-        &args.table,
-        args.partition_column.as_deref(),
-        args.partition_number,
-    )
-    .await
-    .context("failed to build select query")?;
+    let queries = if let Some(query) = args.query {
+        vec![query]
+    } else {
+        build_select_queries(
+            &pool,
+            &args.table,
+            args.partition_column.as_deref(),
+            args.partition_number,
+        )
+        .await
+        .context("failed to build select query")?
+    };
 
     if args.compress {
-        dump(args, queries, pool, s3_client, GzipRecordWriter::default()).await?;
+        dump(
+            queries,
+            pool,
+            s3_client,
+            GzipRecordWriter::default(),
+            &args.table,
+            &args.bucket,
+            &args.prefix,
+            args.object_size,
+        )
+        .await?;
     } else {
-        dump(args, queries, pool, s3_client, PlainRecordWriter::default()).await?;
+        dump(
+            queries,
+            pool,
+            s3_client,
+            PlainRecordWriter::default(),
+            &args.table,
+            &args.bucket,
+            &args.prefix,
+            args.object_size,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -181,11 +207,14 @@ impl RecordWriter for PlainRecordWriter {
 }
 
 async fn dump<W>(
-    args: Args,
     queries: Vec<String>,
     pool: sqlx::MySqlPool,
     s3_client: aws_sdk_s3::Client,
     mut writer: W,
+    table: &str,
+    bucket: &str,
+    prefix: &str,
+    object_size: usize,
 ) -> anyhow::Result<()>
 where
     W: RecordWriter + Send + 'static,
@@ -197,7 +226,7 @@ where
         while let Some(row) = rows
             .try_next()
             .await
-            .with_context(|| format!("failed to read row from {}", args.table))?
+            .with_context(|| format!("failed to read row from {}", table))?
         {
             let record = to_json(&row).context("failed to convert to JSON from MySQL row")?;
             let mut line =
@@ -206,14 +235,14 @@ where
             writer
                 .write_record(&line)
                 .with_context(|| format!("failed to write row data: {:?}", line))?;
-            if writer.len() >= args.object_size {
+            if writer.len() >= object_size {
                 let n = handles.len();
                 handles.push(tokio::spawn(upload(
                     s3_client.clone(),
                     writer,
                     n,
-                    args.bucket.clone(),
-                    args.prefix.clone(),
+                    bucket.to_owned(),
+                    prefix.to_owned(),
                 )));
                 writer = W::default();
             }
@@ -225,8 +254,8 @@ where
             s3_client.clone(),
             writer,
             n,
-            args.bucket.clone(),
-            args.prefix.clone(),
+            bucket.to_owned(),
+            prefix.to_owned(),
         )));
     }
 
