@@ -37,6 +37,18 @@ struct Args {
     compress: bool,
     #[clap(short, long)]
     query: Option<String>,
+
+    // Declare unused options to become drop-in replacement of mys3dump.
+    #[clap(short = 'f', long)]
+    format: Option<String>,
+    #[clap(short, long)]
+    write_concurrency: Option<usize>,
+    #[clap(short = 'k', long)]
+    object_key_delimiter: Option<String>,
+    #[clap(short = 'S', long)]
+    src_zone_offset: Option<String>,
+    #[clap(short = 'T', long)]
+    dst_zone_offset: Option<String>,
 }
 
 #[tokio::main]
@@ -49,6 +61,23 @@ async fn main() -> anyhow::Result<()> {
     }
     tracing_subscriber::fmt::init();
     let args = Args::parse();
+
+    macro_rules! warn_unused_option {
+        ($opt:ident) => {
+            if args.$opt.is_some() {
+                tracing::warn!(concat!(
+                    stringify!($opt),
+                    " option is given but it has no effect on ",
+                    clap::crate_name!(),
+                ));
+            }
+        };
+    }
+    warn_unused_option!(format);
+    warn_unused_option!(write_concurrency);
+    warn_unused_option!(object_key_delimiter);
+    warn_unused_option!(src_zone_offset);
+    warn_unused_option!(dst_zone_offset);
 
     let pool = sqlx::MySqlPool::connect_with(
         sqlx::mysql::MySqlConnectOptions::new()
