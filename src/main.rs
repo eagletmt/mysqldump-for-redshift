@@ -248,7 +248,18 @@ fn to_json(row: &sqlx::mysql::MySqlRow) -> anyhow::Result<serde_json::Value> {
                     row.try_get(col.ordinal()).with_context(|| {
                         format!("failed to deserialize row data of {} column", col.name())
                     })?;
-                val
+                // XXX: Redshift doesn't support JSON column type
+                if let Some(val) = val {
+                    Some(
+                        serde_json::to_string(&val)
+                            .with_context(|| {
+                                format!("failed to serialize JSON column data: {}", val)
+                            })?
+                            .into(),
+                    )
+                } else {
+                    None
+                }
             }
             "BINARY" | "VARBINARY" | "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB" => {
                 // XXX: Redshift doesn't support loading varbyte value with JSON format.
@@ -392,7 +403,7 @@ mod tests {
         // JSON data types
         assert_eq!(
             record.remove("col_json"),
-            Some(serde_json::json!({ "values": [35] }))
+            Some(serde_json::json!(r#"{"values":[35]}"#))
         );
     }
 }
