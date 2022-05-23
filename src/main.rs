@@ -85,11 +85,22 @@ async fn main() -> anyhow::Result<()> {
                         );
                     }
                 }
-                s3_client.delete_objects().bucket(&args.bucket).delete(
-                    aws_sdk_s3::model::Delete::builder()
-                        .set_objects(Some(objects))
-                        .build(),
-                );
+                s3_client
+                    .delete_objects()
+                    .bucket(&args.bucket)
+                    .delete(
+                        aws_sdk_s3::model::Delete::builder()
+                            .set_objects(Some(objects))
+                            .build(),
+                    )
+                    .send()
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to delete objects under s3://{}/{}",
+                            args.bucket, args.prefix
+                        )
+                    })?;
             }
         }
     }
