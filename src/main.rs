@@ -28,6 +28,8 @@ struct Args {
     prefix: String,
     #[clap(short = 'r', long, default_value_t = 64 * 1024 * 1024)]
     object_size: usize,
+    #[clap(short, long)]
+    delete_object: bool,
 }
 
 #[tokio::main]
@@ -54,6 +56,37 @@ async fn main() -> anyhow::Result<()> {
         })?;
 
     let s3_client = aws_sdk_s3::Client::new(&aws_config::load_from_env().await);
+
+    if args.delete_object {
+        let mut paginator = s3_client
+            .list_objects_v2()
+            .bucket(&args.bucket)
+            .prefix(&args.prefix)
+            .delimiter("/")
+            .max_keys(1000)
+            .into_paginator()
+            .send();
+        while let Some(page) = paginator.try_next().await.context("ListObjectsV2 failed")? {
+            if let Some(contents) = page.contents {
+                let mut objects = Vec::with_capacity(contents.len());
+                for c in contents {
+                    if let Some(key) = c.key {
+                        tracing::info!("Delete object: s3://{}/{}", args.bucket, key);
+                        objects.push(
+                            aws_sdk_s3::model::ObjectIdentifier::builder()
+                                .key(key)
+                                .build(),
+                        );
+                    }
+                }
+                s3_client.delete_objects().bucket(&args.bucket).delete(
+                    aws_sdk_s3::model::Delete::builder()
+                        .set_objects(Some(objects))
+                        .build(),
+                );
+            }
+        }
+    }
 
     let query = build_select_query(&mut conn, &args.table)
         .await
