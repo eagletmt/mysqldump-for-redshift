@@ -264,11 +264,14 @@ fn to_json(row: &sqlx::mysql::MySqlRow) -> anyhow::Result<serde_json::Value> {
                 type_name
             ),
         };
-        record.insert(
-            // All Redshift column names are lower case.
-            col.name().to_ascii_lowercase(),
-            json_value.unwrap_or(serde_json::Value::Null),
-        );
+        // Do not emit null fields
+        if let Some(json_value) = json_value {
+            record.insert(
+                // All Redshift column names are lower case.
+                col.name().to_ascii_lowercase(),
+                json_value,
+            );
+        }
     }
     Ok(serde_json::Value::Object(record))
 }
@@ -352,18 +355,12 @@ mod tests {
         // string data types (binary types are not supported)
         assert_eq!(record.remove("col_char"), Some(serde_json::json!("20")));
         assert_eq!(record.remove("col_varchar"), Some(serde_json::json!("21")));
-        assert_eq!(record.remove("col_binary"), Some(serde_json::json!(null)));
-        assert_eq!(
-            record.remove("col_varbinary"),
-            Some(serde_json::json!(null))
-        );
-        assert_eq!(record.remove("col_tinyblob"), Some(serde_json::json!(null)));
-        assert_eq!(record.remove("col_blob"), Some(serde_json::json!(null)));
-        assert_eq!(
-            record.remove("col_mediumblob"),
-            Some(serde_json::json!(null))
-        );
-        assert_eq!(record.remove("col_longblob"), Some(serde_json::json!(null)));
+        assert_eq!(record.remove("col_binary"), None);
+        assert_eq!(record.remove("col_varbinary"), None);
+        assert_eq!(record.remove("col_tinyblob"), None);
+        assert_eq!(record.remove("col_blob"), None);
+        assert_eq!(record.remove("col_mediumblob"), None);
+        assert_eq!(record.remove("col_longblob"), None);
         assert_eq!(record.remove("col_tinytext"), Some(serde_json::json!("28")));
         assert_eq!(record.remove("col_text"), Some(serde_json::json!("29")));
         assert_eq!(
