@@ -35,6 +35,9 @@ create table tests (
   , col_set set('s1', 's2', 's3')
   , col_geometry geometry
   , col_json json
+  , col_time6 time(6)
+  , col_datetime6 datetime(6)
+  , col_timestamp6 timestamp(6) not null default current_timestamp(6) on update current_timestamp(6)
 );
 insert into tests values (
   true
@@ -72,4 +75,7 @@ insert into tests values (
   , 's1,s3'
   , ST_GeomFromText('POINT(34 0)')
   , '{"values": [35]}'
+  , '07:34:48.609548'
+  , '2022-05-23 07:15:09.982443'
+  , '2022-05-23 07:15:23.331896'
 );

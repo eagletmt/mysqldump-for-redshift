@@ -221,21 +221,21 @@ fn to_json(row: &sqlx::mysql::MySqlRow) -> anyhow::Result<serde_json::Value> {
                     row.try_get(col.ordinal()).with_context(|| {
                         format!("failed to deserialize row data of {} column", col.name())
                     })?;
-                val.map(|t| serde_json::Value::from(t.format("%H:%M:%S").to_string()))
+                val.map(|t| serde_json::Value::from(t.format("%H:%M:%S%.f").to_string()))
             }
             "DATETIME" => {
                 let val: Option<chrono::NaiveDateTime> =
                     row.try_get(col.ordinal()).with_context(|| {
                         format!("failed to deserialize row data of {} column", col.name())
                     })?;
-                val.map(|t| serde_json::Value::from(t.format("%Y-%m-%d %H:%M:%S").to_string()))
+                val.map(|t| serde_json::Value::from(t.format("%Y-%m-%d %H:%M:%S%.f").to_string()))
             }
             "TIMESTAMP" => {
                 let val: Option<chrono::DateTime<chrono::Utc>> =
                     row.try_get(col.ordinal()).with_context(|| {
                         format!("failed to deserialize row data of {} column", col.name())
                     })?;
-                val.map(|t| serde_json::Value::from(t.format("%Y-%m-%d %H:%M:%S").to_string()))
+                val.map(|t| serde_json::Value::from(t.format("%Y-%m-%d %H:%M:%S%.f").to_string()))
             }
             "CHAR" | "VARCHAR" | "ENUM" | "TINYTEXT" | "TEXT" | "MEDIUMTEXT" | "LONGTEXT" => {
                 let val: Option<String> = row.try_get(col.ordinal()).with_context(|| {
@@ -350,6 +350,18 @@ mod tests {
         assert_eq!(
             record.remove("col_timestamp"),
             Some(serde_json::json!("2022-05-19 01:54:11"))
+        );
+        assert_eq!(
+            record.remove("col_time6"),
+            Some(serde_json::json!("07:34:48.609548"))
+        );
+        assert_eq!(
+            record.remove("col_datetime6"),
+            Some(serde_json::json!("2022-05-23 07:15:09.982443"))
+        );
+        assert_eq!(
+            record.remove("col_timestamp6"),
+            Some(serde_json::json!("2022-05-23 07:15:23.331896"))
         );
 
         // string data types (binary types are not supported)
