@@ -33,6 +33,8 @@ struct Args {
     partition_column: Option<String>,
     #[clap(short = 'n', long, default_value_t = 4)]
     partition_number: usize,
+    #[clap(short = 'C', long)]
+    compress: bool,
 }
 
 #[tokio::main]
@@ -95,16 +97,88 @@ async fn main() -> anyhow::Result<()> {
     let queries = build_select_queries(
         &pool,
         &args.table,
-        args.partition_column.as_ref().map(|c| c.as_str()),
+        args.partition_column.as_deref(),
         args.partition_number,
     )
     .await
     .context("failed to build select query")?;
 
-    let mut writer = flate2::write::GzEncoder::new(
-        bytes::BytesMut::new().writer(),
-        flate2::Compression::default(),
-    );
+    if args.compress {
+        dump(args, queries, pool, s3_client, GzipRecordWriter::default()).await?;
+    } else {
+        dump(args, queries, pool, s3_client, PlainRecordWriter::default()).await?;
+    }
+    Ok(())
+}
+
+trait RecordWriter: Default {
+    fn suffix() -> &'static str;
+    fn write_record(&mut self, record: &[u8]) -> anyhow::Result<()>;
+    fn len(&self) -> usize;
+    fn finish(self) -> anyhow::Result<bytes::Bytes>;
+}
+
+#[derive(Debug)]
+struct GzipRecordWriter {
+    inner: flate2::write::GzEncoder<bytes::buf::Writer<bytes::BytesMut>>,
+}
+impl Default for GzipRecordWriter {
+    fn default() -> Self {
+        Self {
+            inner: flate2::write::GzEncoder::new(
+                bytes::BytesMut::new().writer(),
+                flate2::Compression::default(),
+            ),
+        }
+    }
+}
+impl RecordWriter for GzipRecordWriter {
+    fn suffix() -> &'static str {
+        ".json.gz"
+    }
+    fn write_record(&mut self, record: &[u8]) -> anyhow::Result<()> {
+        self.inner.write_all(record)?;
+        self.inner.flush()?;
+        Ok(())
+    }
+    fn len(&self) -> usize {
+        self.inner.get_ref().get_ref().len()
+    }
+    fn finish(self) -> anyhow::Result<bytes::Bytes> {
+        Ok(self.inner.finish()?.into_inner().freeze())
+    }
+}
+
+#[derive(Debug, Default)]
+struct PlainRecordWriter {
+    inner: bytes::BytesMut,
+}
+impl RecordWriter for PlainRecordWriter {
+    fn suffix() -> &'static str {
+        ".json"
+    }
+    fn write_record(&mut self, record: &[u8]) -> anyhow::Result<()> {
+        self.inner.put_slice(record);
+        Ok(())
+    }
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+    fn finish(self) -> anyhow::Result<bytes::Bytes> {
+        Ok(self.inner.freeze())
+    }
+}
+
+async fn dump<W>(
+    args: Args,
+    queries: Vec<String>,
+    pool: sqlx::MySqlPool,
+    s3_client: aws_sdk_s3::Client,
+    mut writer: W,
+) -> anyhow::Result<()>
+where
+    W: RecordWriter + Send + 'static,
+{
     let mut handles = Vec::new();
 
     for query in queries {
@@ -119,9 +193,9 @@ async fn main() -> anyhow::Result<()> {
                 serde_json::to_vec(&record).context("failed to serialize row data into JSON")?;
             line.push(0x0a); // Append newline
             writer
-                .write_all(&line)
-                .with_context(|| format!("failed to compress row data: {:?}", line))?;
-            if writer.get_ref().get_ref().len() >= args.object_size {
+                .write_record(&line)
+                .with_context(|| format!("failed to write row data: {:?}", line))?;
+            if writer.len() >= args.object_size {
                 let n = handles.len();
                 handles.push(tokio::spawn(upload(
                     s3_client.clone(),
@@ -130,14 +204,11 @@ async fn main() -> anyhow::Result<()> {
                     args.bucket.clone(),
                     args.prefix.clone(),
                 )));
-                writer = flate2::write::GzEncoder::new(
-                    bytes::BytesMut::new().writer(),
-                    flate2::Compression::default(),
-                );
+                writer = W::default();
             }
         }
     }
-    if !writer.get_ref().get_ref().is_empty() {
+    if writer.len() > 0 {
         let n = handles.len();
         handles.push(tokio::spawn(upload(
             s3_client.clone(),
@@ -155,19 +226,18 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn upload(
+async fn upload<W>(
     s3_client: aws_sdk_s3::Client,
-    writer: flate2::write::GzEncoder<bytes::buf::Writer<bytes::BytesMut>>,
+    writer: W,
     sequence_number: usize,
     bucket: String,
     prefix: String,
-) -> anyhow::Result<()> {
-    let key = format!("{}{:05}.json.gz", prefix, sequence_number);
-    let body = writer
-        .finish()
-        .context("failed to finish comporession")?
-        .into_inner()
-        .freeze();
+) -> anyhow::Result<()>
+where
+    W: RecordWriter,
+{
+    let key = format!("{}{:05}{}", prefix, sequence_number, W::suffix());
+    let body = writer.finish().context("failed to finish comporession")?;
     tracing::info!(
         "Uploading to s3://{}/{} ({} bytes)",
         bucket,
