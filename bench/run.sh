@@ -18,3 +18,6 @@ mysql -h 127.0.0.1 -u $mysql_user -p$mysql_password -D $mysql_database --batch <
 
 time cargo run --release -- -h localhost -P 3306 -u $mysql_user -p $mysql_password -D $mysql_database -t $mysql_table -b eagletmt-test-bucket -x m4r/benchmark_tests/ -d -w 1 -C
 time java -jar "$MYS3DUMP_JAR_PATH" -h localhost -P 3306 -u $mysql_user -p $mysql_password -D $mysql_database -t $mysql_table -b eagletmt-test-bucket -x mys3dump/benchmark_tests/ -d -w 1 -C
+time java -jar "$MYS3DUMP_JAR_PATH" -h localhost -P 3306 -u $mysql_user -p $mysql_password -D $mysql_database -t $mysql_table -b eagletmt-test-bucket -x mys3dump/benchmark_tests/ -d -w 2 -C
+time java -jar "$MYS3DUMP_JAR_PATH" -h localhost -P 3306 -u $mysql_user -p $mysql_password -D $mysql_database -t $mysql_table -b eagletmt-test-bucket -x mys3dump/benchmark_tests/ -d -w 3 -C
+time java -jar "$MYS3DUMP_JAR_PATH" -h localhost -P 3306 -u $mysql_user -p $mysql_password -D $mysql_database -t $mysql_table -b eagletmt-test-bucket -x mys3dump/benchmark_tests/ -d -w 4 -C
