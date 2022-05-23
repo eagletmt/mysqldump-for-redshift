@@ -207,7 +207,6 @@ impl RecordWriter for GzipRecordWriter {
     }
     fn write_record(&mut self, record: &[u8]) -> anyhow::Result<()> {
         self.inner.write_all(record)?;
-        self.inner.flush()?;
         Ok(())
     }
     fn len(&self) -> usize {
