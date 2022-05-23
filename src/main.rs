@@ -542,9 +542,12 @@ mod tests {
         )
         .await
         .unwrap();
-        pool.execute(include_str!("./test_setup.sql"))
-            .await
-            .unwrap();
+        pool.execute(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test/setup.sql"
+        )))
+        .await
+        .unwrap();
 
         let queries = super::build_select_queries(&pool, "tests", None, 0)
             .await
