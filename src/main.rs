@@ -42,7 +42,10 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if std::env::var_os("RUST_LOG").is_none() {
-        std::env::set_var("RUST_LOG", "info");
+        std::env::set_var(
+            "RUST_LOG",
+            "info,sqlx=warn,aws_config=warn,aws_http::auth=warn",
+        );
     }
     tracing_subscriber::fmt::init();
     let args = Args::parse();
@@ -222,6 +225,7 @@ where
     let mut handles = Vec::new();
 
     for query in queries {
+        tracing::info!("Send query to MySQL: {}", query);
         let mut rows = sqlx::query(&query).fetch(&pool);
         while let Some(row) = rows
             .try_next()
