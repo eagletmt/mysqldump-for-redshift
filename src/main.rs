@@ -3,6 +3,7 @@ use bytes::BufMut as _;
 use clap::Parser as _;
 use futures_util::stream::TryStreamExt as _;
 use sqlx::Column as _;
+use sqlx::ConnectOptions as _;
 use sqlx::Row as _;
 use sqlx::TypeInfo as _;
 use std::io::Write as _;
@@ -54,10 +55,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if std::env::var_os("RUST_LOG").is_none() {
-        std::env::set_var(
-            "RUST_LOG",
-            "info,sqlx=warn,aws_config=warn,aws_http::auth=warn",
-        );
+        std::env::set_var("RUST_LOG", "info,aws_config=warn,aws_http::auth=warn");
     }
     tracing_subscriber::fmt::init();
     let args = Args::parse();
@@ -79,21 +77,21 @@ async fn main() -> anyhow::Result<()> {
     warn_unused_option!(src_zone_offset);
     warn_unused_option!(dst_zone_offset);
 
-    let pool = sqlx::MySqlPool::connect_with(
-        sqlx::mysql::MySqlConnectOptions::new()
-            .host(&args.host)
-            .port(args.port)
-            .username(&args.username)
-            .password(&args.password)
-            .database(&args.database),
-    )
-    .await
-    .with_context(|| {
-        format!(
-            "failed to connect to mysql://{}@{}:{}/{}",
-            args.username, args.host, args.port, args.database
-        )
-    })?;
+    let mut connect_options = sqlx::mysql::MySqlConnectOptions::new()
+        .host(&args.host)
+        .port(args.port)
+        .username(&args.username)
+        .password(&args.password)
+        .database(&args.database);
+    connect_options.disable_statement_logging();
+    let pool = sqlx::MySqlPool::connect_with(connect_options)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to connect to mysql://{}@{}:{}/{}",
+                args.username, args.host, args.port, args.database
+            )
+        })?;
 
     let s3_client = aws_sdk_s3::Client::new(&aws_config::load_from_env().await);
 

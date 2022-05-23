@@ -21,16 +21,6 @@ CPU: AMD Ryzen 9 3900X 12-Core Processor
 2022-05-23T17:06:37.650991Z  WARN mysqldump_for_redshift: write_concurrency option is given but it has no effect on mysqldump-for-redshift
 2022-05-23T17:06:38.071897Z  INFO mysqldump_for_redshift: Delete object: s3://eagletmt-test-bucket/m4r/benchmark_tests/00000.json.gz
 2022-05-23T17:06:38.108715Z  INFO mysqldump_for_redshift: Send query to MySQL: select `id`, `name`, `age`, `created_at` from `benchmark_tests`
-2022-05-23T17:06:42.185075Z  WARN sqlx::query: select `id`, `name`, `age`, …; rows affected: 0, rows returned: 1000000, elapsed: 4.073s
-
-select
-  `id`,
-  `name`,
-  `age`,
-  `created_at`
-from
-  `benchmark_tests`
-
 2022-05-23T17:06:42.185368Z  INFO mysqldump_for_redshift: Uploading to s3://eagletmt-test-bucket/m4r/benchmark_tests/00000.json.gz (5504928 bytes)
 
 real    0m5.097s
