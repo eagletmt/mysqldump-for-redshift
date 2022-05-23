@@ -3,7 +3,6 @@ use bytes::BufMut as _;
 use clap::Parser as _;
 use futures_util::stream::TryStreamExt as _;
 use sqlx::Column as _;
-use sqlx::ConnectOptions as _;
 use sqlx::Row as _;
 use sqlx::TypeInfo as _;
 use std::io::Write as _;
@@ -30,6 +29,10 @@ struct Args {
     object_size: usize,
     #[clap(short, long)]
     delete_object: bool,
+    #[clap(short = 'c', long)]
+    partition_column: Option<String>,
+    #[clap(short = 'n', long, default_value_t = 4)]
+    partition_number: usize,
 }
 
 #[tokio::main]
@@ -40,20 +43,21 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 
-    let mut conn = sqlx::mysql::MySqlConnectOptions::new()
-        .host(&args.host)
-        .port(args.port)
-        .username(&args.username)
-        .password(&args.password)
-        .database(&args.database)
-        .connect()
-        .await
-        .with_context(|| {
-            format!(
-                "failed to connect to mysql://{}@{}:{}/{}",
-                args.username, args.host, args.port, args.database
-            )
-        })?;
+    let pool = sqlx::MySqlPool::connect_with(
+        sqlx::mysql::MySqlConnectOptions::new()
+            .host(&args.host)
+            .port(args.port)
+            .username(&args.username)
+            .password(&args.password)
+            .database(&args.database),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to connect to mysql://{}@{}:{}/{}",
+            args.username, args.host, args.port, args.database
+        )
+    })?;
 
     let s3_client = aws_sdk_s3::Client::new(&aws_config::load_from_env().await);
 
@@ -88,10 +92,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let query = build_select_query(&mut conn, &args.table)
-        .await
-        .context("failed to build select query")?;
-    let mut rows = sqlx::query(&query).fetch(&mut conn);
+    let queries = build_select_queries(
+        &pool,
+        &args.table,
+        args.partition_column.as_ref().map(|c| c.as_str()),
+        args.partition_number,
+    )
+    .await
+    .context("failed to build select query")?;
 
     let mut writer = flate2::write::GzEncoder::new(
         bytes::BytesMut::new().writer(),
@@ -99,31 +107,34 @@ async fn main() -> anyhow::Result<()> {
     );
     let mut handles = Vec::new();
 
-    while let Some(row) = rows
-        .try_next()
-        .await
-        .with_context(|| format!("failed to read row from {}", args.table))?
-    {
-        let record = to_json(&row).context("failed to convert to JSON from MySQL row")?;
-        let mut line =
-            serde_json::to_vec(&record).context("failed to serialize row data into JSON")?;
-        line.push(0x0a); // Append newline
-        writer
-            .write_all(&line)
-            .with_context(|| format!("failed to compress row data: {:?}", line))?;
-        if writer.get_ref().get_ref().len() >= args.object_size {
-            let n = handles.len();
-            handles.push(tokio::spawn(upload(
-                s3_client.clone(),
-                writer,
-                n,
-                args.bucket.clone(),
-                args.prefix.clone(),
-            )));
-            writer = flate2::write::GzEncoder::new(
-                bytes::BytesMut::new().writer(),
-                flate2::Compression::default(),
-            );
+    for query in queries {
+        let mut rows = sqlx::query(&query).fetch(&pool);
+        while let Some(row) = rows
+            .try_next()
+            .await
+            .with_context(|| format!("failed to read row from {}", args.table))?
+        {
+            let record = to_json(&row).context("failed to convert to JSON from MySQL row")?;
+            let mut line =
+                serde_json::to_vec(&record).context("failed to serialize row data into JSON")?;
+            line.push(0x0a); // Append newline
+            writer
+                .write_all(&line)
+                .with_context(|| format!("failed to compress row data: {:?}", line))?;
+            if writer.get_ref().get_ref().len() >= args.object_size {
+                let n = handles.len();
+                handles.push(tokio::spawn(upload(
+                    s3_client.clone(),
+                    writer,
+                    n,
+                    args.bucket.clone(),
+                    args.prefix.clone(),
+                )));
+                writer = flate2::write::GzEncoder::new(
+                    bytes::BytesMut::new().writer(),
+                    flate2::Compression::default(),
+                );
+            }
         }
     }
     if !writer.get_ref().get_ref().is_empty() {
@@ -174,9 +185,14 @@ async fn upload(
     Ok(())
 }
 
-async fn build_select_query<'c, E>(executor: E, table: &str) -> anyhow::Result<String>
+async fn build_select_queries<'a, 'c, E>(
+    executor: &'a E,
+    table: &str,
+    partition_column: Option<&str>,
+    partition_number: usize,
+) -> anyhow::Result<Vec<String>>
 where
-    E: sqlx::Executor<'c, Database = sqlx::MySql>,
+    &'a E: sqlx::Executor<'c, Database = sqlx::MySql>,
 {
     let test_query = format!("select * from `{}` limit 1", table);
     let row = sqlx::query(&test_query)
@@ -196,14 +212,57 @@ where
             };
             column_names.push(name);
         }
-        Ok(format!(
-            "select {} from `{}`",
-            column_names.join(", "),
-            table
-        ))
+        if let Some(partition_column) = partition_column {
+            let (min, max): (i64, i64) = sqlx::query_as(&format!(
+                "select min({}), max({}) from `{}`",
+                partition_column, partition_column, table
+            ))
+            .fetch_one(executor)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to fetch min/max value of {} column in {} table",
+                    partition_column, table
+                )
+            })?;
+            let estimated_rows = max - min + 1;
+            let partition_size = if estimated_rows < partition_number as i64 {
+                estimated_rows
+            } else {
+                (estimated_rows as f64 / partition_number as f64).ceil() as i64
+            };
+            tracing::info!(
+                "{} ranges from {} to {}, partition_size={}",
+                partition_column,
+                min,
+                max,
+                partition_size
+            );
+            let mut start = min;
+            let mut queries = Vec::new();
+            while start <= max {
+                let end = std::cmp::min(start + partition_size - 1, max);
+                queries.push(format!(
+                    "select {} from `{}` where `{}` between {} and {}",
+                    column_names.join(", "),
+                    table,
+                    partition_column,
+                    start,
+                    end
+                ));
+                start = end + 1;
+            }
+            Ok(queries)
+        } else {
+            Ok(vec![format!(
+                "select {} from `{}`",
+                column_names.join(", "),
+                table
+            )])
+        }
     } else {
         // No rows
-        Ok(format!("select * from `{}`", table))
+        Ok(vec![format!("select * from `{}`", table)])
     }
 }
 
@@ -322,27 +381,30 @@ fn to_json(row: &sqlx::mysql::MySqlRow) -> anyhow::Result<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
-    use sqlx::ConnectOptions as _;
     use sqlx::Executor as _;
 
     #[tokio::test]
     async fn it_works() {
-        let mut conn = sqlx::mysql::MySqlConnectOptions::new()
-            .host("localhost")
-            .port(3306)
-            .username(std::env::var("MYSQL_USER").as_ref().unwrap())
-            .password(std::env::var("MYSQL_PWD").as_ref().unwrap())
-            .database(std::env::var("MYSQL_DATABASE").as_ref().unwrap())
-            .connect()
-            .await
-            .unwrap();
-        conn.execute(include_str!("./test_setup.sql"))
+        let pool = sqlx::MySqlPool::connect_with(
+            sqlx::mysql::MySqlConnectOptions::new()
+                .host("localhost")
+                .port(3306)
+                .username(std::env::var("MYSQL_USER").as_ref().unwrap())
+                .password(std::env::var("MYSQL_PWD").as_ref().unwrap())
+                .database(std::env::var("MYSQL_DATABASE").as_ref().unwrap()),
+        )
+        .await
+        .unwrap();
+        pool.execute(include_str!("./test_setup.sql"))
             .await
             .unwrap();
 
-        const TABLE: &str = "tests";
-        let query = super::build_select_query(&mut conn, TABLE).await.unwrap();
-        let row = sqlx::query(&query).fetch_one(&mut conn).await.unwrap();
+        let queries = super::build_select_queries(&pool, "tests", None, 0)
+            .await
+            .unwrap();
+        assert_eq!(queries.len(), 1);
+        let query = &queries[0];
+        let row = sqlx::query(query).fetch_one(&pool).await.unwrap();
         let mut record = super::to_json(&row).unwrap();
         let record = record.as_object_mut().unwrap();
 
@@ -437,6 +499,28 @@ mod tests {
         assert_eq!(
             record.remove("col_json"),
             Some(serde_json::json!(r#"{"values":[35]}"#))
+        );
+
+        // Partitioned table
+        let queries = super::build_select_queries(&pool, "partitioned_tests", Some("id"), 4)
+            .await
+            .unwrap();
+        assert_eq!(queries.len(), 4);
+        assert_eq!(
+            queries[0],
+            "select `id` from `partitioned_tests` where `id` between 1 and 5"
+        );
+        assert_eq!(
+            queries[1],
+            "select `id` from `partitioned_tests` where `id` between 6 and 10"
+        );
+        assert_eq!(
+            queries[2],
+            "select `id` from `partitioned_tests` where `id` between 11 and 15"
+        );
+        assert_eq!(
+            queries[3],
+            "select `id` from `partitioned_tests` where `id` between 16 and 20"
         );
     }
 }

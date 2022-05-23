@@ -79,3 +79,17 @@ insert into tests values (
   , '2022-05-23 07:15:09.982443'
   , '2022-05-23 07:15:23.331896'
 );
+
+drop table if exists partitioned_tests;
+create table partitioned_tests (id bigint not null) partition by range(id) (
+  partition p0 values less than (10)
+  , partition p1 values less than (20)
+  , partition pmax values less than maxvalue
+);
+insert into partitioned_tests values
+  (1)
+  , (5)
+  , (10)
+  , (15)
+  , (20)
+;
